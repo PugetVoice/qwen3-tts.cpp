@@ -13,7 +13,7 @@ Runs the full TTS pipeline in pure C++17, including text tokenization, speaker e
 - Full text-to-speech pipeline in C++17 with GGML backend
 - Voice cloning from reference audio (ECAPA-TDNN x-vector extraction)
 - Greedy and sampled decoding (temperature, top-k, repetition penalty)
-- GGUF model format (F16 and Q8_0 quantization)
+- GGUF model format (F16, Q8_0, Q4_0, and Q4_K quantization)
 - Runtime backend selection with GPU/Metal preference and CPU fallback
 - Deterministic reference tests comparing C++ output against Python
 - Compile-time timing instrumentation with zero overhead in normal builds
@@ -142,16 +142,63 @@ huggingface-cli download Qwen/Qwen3-TTS-12Hz-0.6B-Base \
 
 # Convert TTS model (transformer + speaker encoder + tokenizer)
 python scripts/convert_tts_to_gguf.py \
-    models/Qwen3-TTS-12Hz-0.6B-Base \
-    models/qwen3-tts-0.6b-f16.gguf
+    --type f16 \
+    --input models/Qwen3-TTS-12Hz-0.6B-Base \
+    --output models/qwen3-tts-0.6b-f16.gguf
 
 # Convert vocoder (audio decoder)
 python scripts/convert_tokenizer_to_gguf.py \
-    models/Qwen3-TTS-12Hz-0.6B-Base \
-    models/qwen3-tts-tokenizer-f16.gguf
+    --type f16 \
+    --input models/Qwen3-TTS-12Hz-0.6B-Base \
+    --output models/qwen3-tts-tokenizer-f16.gguf
 ```
 
 Place both `.gguf` files in a `models/` directory.
+
+For quantized models, use distinct output filenames to preserve the F16 originals:
+
+```bash
+# Q4_K uses native GGML encoding; gguf-py only implements Q4_K decoding.
+cmake -S ggml -B ggml/build -DBUILD_SHARED_LIBS=ON
+cmake --build ggml/build -j4
+
+python scripts/convert_tts_to_gguf.py --type q4_k \
+    --input models/Qwen3-TTS-12Hz-0.6B-Base \
+    --output models/qwen3-tts-0.6b-q4_k.gguf
+
+python scripts/convert_tts_to_gguf.py --type q8_0 \
+    --input models/Qwen3-TTS-12Hz-0.6B-Base \
+    --output models/qwen3-tts-0.6b-q8_0.gguf
+
+python scripts/convert_tokenizer_to_gguf.py --type q8_0 \
+    --input models/Qwen3-TTS-12Hz-0.6B-Base \
+    --output models/qwen3-tts-tokenizer-q8_0.gguf
+```
+
+Both scripts also support `--type q4_0`, which needs no native library.
+Only compatible 2D weights are quantized; convolutions stay F16, and biases
+and 1D norms stay F32. TTS embeddings and output heads, and vocoder codebooks,
+also stay floating point. Large TTS embeddings limit the total size reduction.
+Q4_K here uses Q4_K for eligible matrices, not llama.cpp's Q4_K_M mixed recipe.
+Each conversion prints the actual tensor type counts and stops on unexpected
+quantization errors instead of silently falling back to F16.
+
+The CLI currently searches for `qwen3-tts-0.6b-q8_0.gguf` (preferred) or
+`qwen3-tts-0.6b-f16.gguf`, plus `qwen3-tts-tokenizer-f16.gguf`.
+To select Q4_K without changing your original files, use a separate directory
+with links under those expected names (the file contents determine precision):
+
+```bash
+mkdir -p models/q4_k
+ln -s ../qwen3-tts-0.6b-q4_k.gguf models/q4_k/qwen3-tts-0.6b-f16.gguf
+ln -s ../qwen3-tts-tokenizer-q8_0.gguf models/q4_k/qwen3-tts-tokenizer-f16.gguf
+./build/qwen3-tts-cli -m models/q4_k -r examples/readme_clone_input.wav \
+    -t "Hello, world!" -o hello-q4.wav
+```
+
+Use reference audio (`-r`) with the Base model. The CLI's zero speaker
+embedding without reference audio can produce
+near-silent output, including with F16 weights.
 
 ## Usage
 

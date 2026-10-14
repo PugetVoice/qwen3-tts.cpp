@@ -34,6 +34,8 @@ except (PermissionError, OSError):
 
 import gguf
 
+from gguf_quantization import Quantizer
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -174,6 +176,7 @@ class Qwen3TTSTokenizerConverter:
         self.input_dir = input_dir
         self.output_path = output_path
         self.output_type = output_type
+        self.quantizer = Quantizer(output_type)
 
         # Load config
         self.config = self._load_config()
@@ -283,20 +286,18 @@ class Qwen3TTSTokenizerConverter:
             return data.astype(np.float32), gguf.GGMLQuantizationType.F32
         elif self.output_type == "f16":
             return data.astype(np.float16), gguf.GGMLQuantizationType.F16
-        elif self.output_type == "q8_0":
+        elif self.output_type in ("q8_0", "q4_0"):
+            qtype = gguf.GGMLQuantizationType.Q8_0 if self.output_type == "q8_0" else gguf.GGMLQuantizationType.Q4_0
             # Keep some tensors in F16 for quality (codebooks, norms)
             if any(x in tensor_name for x in ["codebook", "_norm", "norm.", "scale", "alpha", "beta"]):
                 return data.astype(np.float16), gguf.GGMLQuantizationType.F16
-            
-            data = data.astype(np.float32)
-            try:
-                quantized = gguf.quants.quantize(data, gguf.GGMLQuantizationType.Q8_0)
-                return quantized, gguf.GGMLQuantizationType.Q8_0
-            except Exception as e:
-                logger.warning(f"Q8_0 quantization failed for {tensor_name}: {e}, falling back to F16")
+
+            if not self.quantizer.can_quantize(data):
                 return data.astype(np.float16), gguf.GGMLQuantizationType.F16
+
+            return self.quantizer.quantize(data), qtype
         else:
-            return data.astype(np.float16), gguf.GGMLQuantizationType.F16
+            raise ValueError(f"Unsupported output type: {self.output_type}")
 
     def convert(self) -> None:
         """Convert the model to GGUF format."""
@@ -317,6 +318,7 @@ class Qwen3TTSTokenizerConverter:
 
         # Process tensors
         tensor_count = 0
+        dtype_counts: dict[str, int] = {}
         skipped_count = 0
         skipped_tensors = []
         
@@ -367,6 +369,7 @@ class Qwen3TTSTokenizerConverter:
             # Add tensor to writer
             writer.add_tensor(ggml_name, data, raw_dtype=dtype)
             tensor_count += 1
+            dtype_counts[dtype.name] = dtype_counts.get(dtype.name, 0) + 1
 
             logger.debug(f"  {hf_name} -> {ggml_name} [{dtype.name}] {data.shape}")
 
@@ -375,6 +378,8 @@ class Qwen3TTSTokenizerConverter:
             logger.debug("Skipped tensors:")
             for t in skipped_tensors:
                 logger.debug(f"  {t}")
+
+        logger.info(f"Tensor types: {dtype_counts}")
 
         # Write to file
         logger.info(f"Writing GGUF file to {self.output_path}")
@@ -400,6 +405,8 @@ class Qwen3TTSTokenizerConverter:
             ftype = gguf.LlamaFileType.MOSTLY_F16
         elif self.output_type == "q8_0":
             ftype = gguf.LlamaFileType.MOSTLY_Q8_0
+        elif self.output_type == "q4_0":
+            ftype = gguf.LlamaFileType.MOSTLY_Q4_0
         else:
             ftype = gguf.LlamaFileType.MOSTLY_F16
         writer.add_file_type(ftype)
@@ -453,7 +460,7 @@ def main():
     )
     parser.add_argument(
         "--type", "-t",
-        choices=["f16", "f32", "q8_0"],
+        choices=["f16", "f32", "q8_0", "q4_0"],
         default="f16",
         help="Output data type (default: f16)"
     )

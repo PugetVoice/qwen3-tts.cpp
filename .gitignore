@@ -7,6 +7,7 @@ build/
 
 # Models (too large for git)
 models/*.gguf
+models/**/*.gguf
 models/Qwen3-TTS-*/
 models/coreml/
 
